@@ -3,193 +3,248 @@ import torchaudio
 import soundfile as sf
 import subprocess
 import random
-import tempfile
 import csv
 from pathlib import Path
+import os
+import warnings
 
-
-TARGET_SR = 16000
-SNR_CHOICES = [-5, 0, 5, 10, 15, 20]
-
-ESC50_META_CSV = Path(
-    "/home/bs_thesis/Documents/EnvDatasets/ESC-50-master/meta/esc50.csv"
-)
-
-ALLOWED_CATEGORIES = {
-    "dog",
-    "chirping_birds",
-    "crow",
-    "clapping",
-    "mouse_click",
-    "water_drops",
-    "keyboard_typing",
-    "wind",
-    "footsteps",
-    "car_horn",
-    "rain",
-    "insects",
-    "laughing",
-    "engine",
-    "washing_machine",
-    "door_wood_creaks",
-    "crickets",
-}
-
-
-def load_esc50_metadata(csv_path):
-   
-    meta = {}
-    with open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            meta[row["filename"]] = row["category"]
-    return meta
-
-
-def load_audio(path, target_sr=TARGET_SR):
-    wav, sr = torchaudio.load(path)
-    if sr != target_sr:
-        wav = torchaudio.functional.resample(wav, sr, target_sr)
-    wav = wav.mean(dim=0)
-    return wav.numpy(), target_sr
-
-
-def save_audio(path, wav, sr):
-    wav = wav / (np.max(np.abs(wav)) + 1e-9)
-    sf.write(path, wav, sr)
-
-
-def loop_or_crop(x, length):
-    if len(x) >= length:
-        return x[:length]
-    reps = int(np.ceil(length / len(x)))
-    return np.tile(x, reps)[:length]
-
-
-def spectral_tilt(x, alpha):
-    y = np.zeros_like(x)
-    for i in range(1, len(x)):
-        y[i] = x[i] - alpha * x[i - 1]
-    return y
-
-
-def mix_at_snr(speech, bg, snr_db):
-    sp = np.mean(speech ** 2)
-    bp = np.mean(bg ** 2) + 1e-9
-    scale = np.sqrt(sp / (bp * 10 ** (snr_db / 10)))
-    return speech + bg * scale
-
-
-
-def fake_scene_generation(ORIGINAL_FILES_DIR, DENOISED_OUT_DIR, NOISE_DIR, OUT_DIR, ESC_META,SNR_DB=SNR_CHOICES , MAX_FILES=None ):
-    os.makedirs(OUT_DIR, exist_ok=True)
-    inp = Path(ORIGINAL_FILES_DIR)
-    out = Path(OUT_DIR)
-    denoised_out_dir = Path(DENOISED_OUT_DIR)
+from fake_gen_meta import *
+from utils import *
     
-    all_noise_files = list(Path(NOISE_DIR).rglob("*.wav"))
+def random_burst_mask(length): #   gradual increase or decrease in the amplitude of the background sound at its start or end.
+    mask = np.zeros(length)
 
-    noise_files = [
-        p for p in all_noise_files
-        if ESC_META.get(p.name) in ALLOWED_CATEGORIES
-    ]
+    # Ensure first burst starts near beginning
+    current_pos = 0
+    num_events = random.randint(1, 4)
 
-    speech_files = sorted(inp.rglob("*.wav"))
-    if MAX_FILES is not None:
-        speech_files = speech_files[MAX_FILES:]
+    for i in range(num_events):
+
+        if i == 0:
+            start = 0
+        else:
+            start = random.randint(current_pos, length - 1)
+
+        dur = random.randint(length // 8, length // 3)
+        end = min(length, start + dur)
+
+        fade_len = random.randint(
+            int(0.02 * length),     # small fade
+            int(0.1 * length)       # large fade
+        )
+        fade_len = min(fade_len, (end - start) // 2)
+
+        if fade_len > 0:
+            ramp = np.linspace(0, 1, fade_len)
+
+            mask[start:start+fade_len] += ramp
+            mask[end-fade_len:end] += ramp[::-1]
+            mask[start+fade_len:end-fade_len] += 1
+        else:
+            mask[start:end] += 1
+
+        current_pos = end
+        if current_pos >= length:
+            break
+
+    return np.clip(mask, 0, 1)
 
 
-    for wav in speech_files:
+
+def time_varying_snr_mix(speech, noise):
+    
+    length = len(speech)
+    segments = random.randint(2, 5)
+    seg_len = length // segments
+    output = np.zeros_like(speech)
+    snr_values = []
+
+    for i in range(segments):
+        start = i * seg_len
+        end = length if i == segments - 1 else (i + 1) * seg_len
+
+        snr_db = random.choice(SNR_CHOICES)
+        snr_values.append(snr_db)
+
+        sp = np.mean(speech[start:end] ** 2)
+        bp = np.mean(noise[start:end] ** 2) + 1e-9
+        scale = np.sqrt(sp / (bp * 10 ** (snr_db / 10)))
+
+        output[start:end] = speech[start:end] + noise[start:end] * scale
+
+    return output, snr_values
+
+def generate_complex_background(speech, noise_files):
+    length = len(speech)
+    combined = np.zeros(length)
+    scene_labels = []
+
+    num_sources = random.randint(1, 3)
+
+    for _ in range(num_sources):
+        noise_path = random.choice(noise_files)
+        noise, _ = load_audio(str(noise_path))
+        noise = loop_or_crop(noise, length)
+
+        mask = random_burst_mask(length)
+        noise = noise * mask
+
+        combined += noise
+        scene_labels.append(noise_path.stem)
+
+    return combined, "+".join(scene_labels)
+
+
+
+def generate_scene_coherent_background(denoised_audio, noise_files, esc_meta):
+    length = len(denoised_audio)
+    combined = np.zeros(length)
+
+    scene_group_name = random.choice(list(SCENE_GROUPS.keys()))
+    allowed_categories = SCENE_GROUPS[scene_group_name]
+    selection_pool = allowed_categories + ["silence"]
+
+    categories_added = []
+    noise_labels = []
+
+    current_pos = 0
+
+    while current_pos < length:
+
+        category = random.choice(selection_pool)
+
+        # Silence event
+        if category == "silence":
+            gap = random.randint(int(0.05 * length), int(0.15 * length))
+            current_pos += gap
+            continue
+
+        candidate_files = [
+            p for p in noise_files
+            if esc_meta.get(p.name) == category
+        ]
+
+        if not candidate_files:
+            continue
+
+        noise_path = random.choice(candidate_files)
+        noise, _ = load_audio(str(noise_path))
+
+        event_len = min(len(noise), length - current_pos)
+
+        fade_len = min(int(0.05 * event_len), event_len // 2)
+        ramp = np.linspace(0, 1, fade_len)
+
+        segment = noise[:event_len].copy()
+
+        if fade_len > 0:
+            segment[:fade_len] *= ramp
+            segment[-fade_len:] *= ramp[::-1]
+
+        combined[current_pos:current_pos+event_len] += segment
+
+        categories_added.append(category)
+        noise_labels.append(noise_path.stem)
+
+        overlap_shift = random.randint(
+            int(0.5 * event_len),
+            event_len
+        )
+
+        current_pos += overlap_shift
+
+    if not categories_added:
+        categories_added = ["silence"]
+        noise_labels = ["none"]
+
+    return (
+        combined,
+        scene_group_name,
+        "+".join(noise_labels),
+        "+".join(categories_added)
+    )
+
+def fake_scene_generation(
+    ORIGINAL_FILES_DIR,
+    DENOISED_OUT_DIR,
+    NOISE_DIR,
+    OUT_DIR,
+    ESC_META,
+    MAX_FILES=None,
+):
+    print("Starting fake scene generation...")
+    all_noise_files = list((NOISE_DIR).rglob("*.wav"))
+
+    original_files = sorted(ORIGINAL_FILES_DIR.rglob("*.wav"))
+
+    if MAX_FILES:
+        original_files = original_files[:MAX_FILES]
+    print("Looping through original files...")
+    for wav in original_files:
         FILE_NAME = wav.stem
+
         subprocess.run([
             "deepFilter",
             str(wav),
-            "--output-dir", str(denoised_out_dir)
+            "--output-dir", str(DENOISED_OUT_DIR)
         ], check=True)
 
-        print(f"DENOISED {wav.name}")
+        print("Denoised :", wav.name)
+        denoised_path = DENOISED_OUT_DIR / f"{FILE_NAME}_DeepFilterNet3.wav"
+        speech, sr = load_audio(denoised_path)
 
-        DENOISED_WAV = denoised_out_dir / f"{FILE_NAME}_DeepFilterNet3.wav"
-        speech, sr = load_audio(DENOISED_WAV)
-        # noise_path = random.choice(noise_files)
-        # noise_name = noise_path.stem
-        noise_path = random.choice(noise_files)
-        noise_filename = noise_path.name
-        scene_name = ESC_META.get(noise_filename, "unknown")
+        print("Generating background for :", wav.name)
 
-
-        snr_db = random.choice(SNR_DB)
-        noise, _ = load_audio(str(noise_path))
-
-        noise = loop_or_crop(noise, len(speech))
-
-        speech_col = spectral_tilt(speech, alpha=0.95)
-        noise_col = spectral_tilt(noise, alpha=0.70)
-        # output_wav = out / f"{FILE_NAME}_SNR{snr_db}_{scene_name}_fake.wav"
-        output_wav = out / f"{FILE_NAME}_SNR{snr_db}_{scene_name}.wav"
+        background, scene_group, noise_labels, categories_added = \
+    generate_scene_coherent_background(
+        speech, all_noise_files, ESC_META
+)
 
 
-        fake = mix_at_snr(speech_col, noise_col, snr_db)
+        # fake = time_varying_snr_mix(speech, background)
+        fake, snr_values = time_varying_snr_mix(speech, background)
+
+
+        output_wav = OUT_DIR / f"{FILE_NAME}_{scene_group}.wav"
         save_audio(output_wav, fake, sr)
-
-
-        with open(log_path, "a", newline="") as f:
+        print("Saved fake scene:", output_wav.name)
+        
+        with open(SCENE_META_CSV, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
-                wav.name,
-                output_wav.name,
-                
-                scene_name,
-                snr_db
-            ])
+    wav.name,
+    output_wav.name,
+    scene_group,
+    noise_labels,
+    categories_added,
+    "+".join(map(str, snr_values))
+])
 
 
 
-def is_allowed_file(path):
-    """
-    Exclude aud289_dev3.wav to aud348_dev3.wav (inclusive) - since this is the files with music background and the model doesnot work well music mainly the vocal part. 
-    """
-    name = path.stem  # audXXX_dev3
-    try:
-        idx = int(name.split("_")[0].replace("aud", ""))
-    except ValueError:
-        return False  # skip malformed names
-
-    return not (289 <= idx <= 348)
-
-
-# ------------------ MAIN ------------------
 
 if __name__ == "__main__":
+    os.makedirs(OUTPUT_DENOISED_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_FAKE_SCENES_DIR, exist_ok=True)
 
-    speech_dir = Path("/home/bs_thesis/Documents/OurDataset/device3_iphone/")
-    speech_files = sorted(
-        p for p in speech_dir.glob("aud*_dev3.wav")
-        if is_allowed_file(p)
-    )
+    with open(SCENE_META_CSV, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+    "original_file",
+    "new_file",
+    "scene_group",
+    "noise_labels",
+    "categories_added",
+    "snr_segments"
+])
 
     esc50_meta = load_esc50_metadata(ESC50_META_CSV)
 
-    noise_dir = Path("/home/bs_thesis/Documents/EnvDatasets/ESC-50-master/audio")
-    denoised_out_dir = Path("/home/bs_thesis/Documents/scenefakegeneration_ours/FakeCreation/FakeScenesDenoised")
-    out_dir = Path("/home/bs_thesis/Documents/scenefakegeneration_ours/FakeScenes")
-    log_path = out_dir / "scene_metadata.csv"
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    denoised_out_dir.mkdir(parents=True, exist_ok=True)
-
-    with open(log_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "original_file",
-            "new_file",
-            # "new_path",
-            "scene_name",
-            "snr_db"
-        ])
     fake_scene_generation(
-        ORIGINAL_FILES_DIR=speech_dir,
-        DENOISED_OUT_DIR=denoised_out_dir,
-        NOISE_DIR=noise_dir,ESC_META=esc50_meta,
-        OUT_DIR=out_dir,
-        SNR_DB=SNR_CHOICES ,MAX_FILES=100     )
+        ORIGINAL_FILES_DIR=INPUT_ORIGINAL_DIR,
+        DENOISED_OUT_DIR=OUTPUT_DENOISED_DIR,
+        NOISE_DIR=NOISE_DIR,
+        OUT_DIR=OUTPUT_FAKE_SCENES_DIR,
+        ESC_META=esc50_meta,
+        MAX_FILES=None
+    )
