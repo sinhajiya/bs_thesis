@@ -81,8 +81,8 @@ def _get_optimizer(model_parameters, optim_config):
                                      lr=optim_config['base_lr'],
                                      betas=optim_config['betas'],
                                      weight_decay=optim_config['weight_decay'],
-                                     amsgrad=str_to_bool(
-                                         optim_config['amsgrad']))
+                                     amsgrad=
+                                         optim_config['amsgrad'])
     else:
         print('Un-known optimizer', optimizer_name)
         sys.exit()
@@ -153,5 +153,7 @@ def set_seed(seed, config = None):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = str_to_bool(config["cudnn_deterministic_toggle"])
-        torch.backends.cudnn.benchmark = str_to_bool(config["cudnn_benchmark_toggle"])
+        torch.backends.cudnn.deterministic =config["cudnn_deterministic_toggle"]
+        torch.backends.cudnn.benchmark = config["cudnn_benchmark_toggle"]
+        # torch.backends.cudnn.deterministic = str_to_bool(config["cudnn_deterministic_toggle"])
+        # torch.backends.cudnn.benchmark = str_to_bool(config["cudnn_benchmark_toggle"])

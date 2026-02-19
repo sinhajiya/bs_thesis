@@ -1,13 +1,164 @@
 import sys
 import os
-
+import torch
 import numpy as np
+from collections import defaultdict
+from sklearn.metrics import roc_curve
+from sklearn.metrics import confusion_matrix, classification_report
+import numpy as np
+import csv
+
+# real 0 h and fake 1
+def evaluate_eer(loader, model, device):
+    """
+    Standard evaluation (no chunk aggregation).
+    Fake (label=1) is treated as positive class.
+    """
+
+    model.eval()
+
+    scores = []
+    labels = []
+
+    with torch.no_grad():
+        for batch_x, batch_y in loader:
+            batch_x = batch_x.to(device, non_blocking=True)
+
+            _, out = model(batch_x)
+
+            # Use Fake score (class 1)
+            fake_score = out[:, 1].detach().cpu().numpy()
+
+            scores.extend(fake_score)
+            labels.extend(batch_y.numpy())
+
+    scores = np.array(scores)
+    labels = np.array(labels)
+
+    # Positive class = Fake
+    fake_scores = scores[labels == 1]
+    real_scores = scores[labels == 0]
+
+    eer, threshold = compute_eer(fake_scores, real_scores)
+
+    print(f"\nEER: {eer * 100:.3f}%")
+    print(f"EER Threshold: {threshold:.6f}")
+
+    # Predictions at EER threshold
+    preds = (scores >= threshold).astype(int)
+
+    cm = confusion_matrix(labels, preds)
+
+    print("\nConfusion Matrix")
+    print("Labels: 0=Real, 1=Fake")
+    print(cm)
+
+    print("\nClassification Report:")
+    print(classification_report(labels, preds, digits=4))
+
+    return eer * 100
+
+from collections import defaultdict
+import csv
+
+def evaluate_wild_mean(loader, model, device, save_path="wild_predictions.csv"):
+    """
+    Wild evaluation:
+    - Chunk-level inference
+    - Mean aggregation per file
+    - Fake (1) is positive class
+    """
+
+    model.eval()
+
+    file_scores = defaultdict(list)
+    file_labels = {}
+
+    # -----------------------------
+    # 1️⃣ Collect chunk scores
+    # -----------------------------
+    with torch.no_grad():
+        for batch_x, batch_y, paths in loader:
+
+            batch_x = batch_x.to(device)
+            _, out = model(batch_x)
+
+            fake_scores = out[:, 1].detach().cpu().numpy()
+
+            for score, label, path in zip(fake_scores, batch_y.numpy(), paths):
+                file_scores[path].append(score)
+                file_labels[path] = label
+
+    # -----------------------------
+    # 2️⃣ Aggregate per file
+    # -----------------------------
+    aggregated_scores = []
+    aggregated_labels = []
+    aggregated_paths = []
+
+    for path in file_scores:
+        mean_score = np.mean(file_scores[path])
+
+        aggregated_scores.append(mean_score)
+        aggregated_labels.append(file_labels[path])
+        aggregated_paths.append(path)
+
+    aggregated_scores = np.array(aggregated_scores)
+    aggregated_labels = np.array(aggregated_labels)
+
+    # -----------------------------
+    # 3️⃣ Compute EER (Fake positive)
+    # -----------------------------
+    fake_scores = aggregated_scores[aggregated_labels == 1]
+    real_scores = aggregated_scores[aggregated_labels == 0]
+
+    eer, threshold = compute_eer(fake_scores, real_scores)
+
+    print(f"\nEER: {eer * 100:.3f}%")
+    print(f"EER Threshold: {threshold:.6f}")
+
+    # -----------------------------
+    # 4️⃣ Predictions at EER threshold
+    # -----------------------------
+    preds = (aggregated_scores >= threshold).astype(int)
+
+    # -----------------------------
+    # 5️⃣ Confusion Matrix
+    # -----------------------------
+    cm = confusion_matrix(aggregated_labels, preds)
+
+    print("\nConfusion Matrix (File-level)")
+    print("Labels: 0=Real, 1=Fake")
+    print(cm)
+
+    print("\nClassification Report:")
+    print(classification_report(aggregated_labels, preds, digits=4))
+
+    print("\nMean Real Score:", np.mean(real_scores))
+    print("Mean Fake Score:", np.mean(fake_scores))
+
+    # -----------------------------
+    # 6️⃣ Save predictions
+    # -----------------------------
+    with open(save_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["filename", "true_label", "predicted_label", "score", "threshold"])
+
+        for path, true, pred, score in zip(
+            aggregated_paths, aggregated_labels, preds, aggregated_scores
+        ):
+            writer.writerow([path, true, pred, score, threshold])
+
+    print(f"\nSaved predictions → {save_path}")
+
+    return eer * 100
 
 
 def calculate_tDCF_EER(cm_scores_file,
                        asv_score_file,
                        output_file,
                        printout=True):
+    
     # Replace CM scores with your own scores or provide score file as the
     # first argument.
     # cm_scores_file =  'score_cm.txt'
