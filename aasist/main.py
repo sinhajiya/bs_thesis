@@ -23,12 +23,12 @@ from torchcontrib.optim import SWA
 
 from data_utils import *
 
-from evaluation import evaluate_eer, evaluate_wild_mean
+# from evaluation import evaluate_eer, evaluate_wild_mean
 from utils import create_optimizer, seed_worker, set_seed, str_to_bool
 
-from evaal import *
+from eval import *
 from tqdm import tqdm
-
+from datetime import datetime
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -64,14 +64,16 @@ def main(args: argparse.Namespace) -> None:
     dataset_name = config["dataset_name"]
 
         # define model related paths    
-    model_tag = f"{dataset_name}_{config['suffix']}_ep{config['num_epochs']}"
+    # define model related paths    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    model_tag = f"{dataset_name}_{config['suffix']}_{timestamp}"
 
     model_tag = output_dir / model_tag
     model_save_path = model_tag / "weights"
-    metric_path = model_tag / "metrics"
+    
 
     model_save_path.mkdir(parents=True, exist_ok=True)
-    metric_path.mkdir(parents=True, exist_ok=True)
 
     copy(args.config, model_tag / "config.json")
     checkpoint_dir = model_tag / "checkpoints"
@@ -102,11 +104,23 @@ def main(args: argparse.Namespace) -> None:
 
         print("Model loaded : {}".format(config["model_path"]))
      
-        eval_eer = evaluate_eer_utterance(eval_loader, model, device)
+        if config["protocols"]["real_test"] == "scenefake":
+            folds = [
+                "/home/bs_thesis/datasets/SceneFakeDataset/protocols/scenefake_folds/scenefake_folds/scenefake_eval_fold0.txt",
+                "/home/bs_thesis/datasets/SceneFakeDataset/protocols/scenefake_folds/scenefake_folds/scenefake_eval_fold1.txt",
+                "/home/bs_thesis/datasets/SceneFakeDataset/protocols/scenefake_folds/scenefake_folds/scenefake_eval_fold2.txt",
+                "/home/bs_thesis/datasets/SceneFakeDataset/protocols/scenefake_folds/scenefake_folds/scenefake_eval_fold3.txt",
+                "/home/bs_thesis/datasets/SceneFakeDataset/protocols/scenefake_folds/scenefake_folds/scenefake_eval_fold4.txt",
+                "/home/bs_thesis/datasets/SceneFakeDataset/protocols/scenefake_folds/scenefake_folds/scenefake_eval_fold5.txt",
+                "/home/bs_thesis/datasets/SceneFakeDataset/protocols/scenefake_folds/scenefake_folds/scenefake_eval_fold6.txt",
+                "/home/bs_thesis/datasets/SceneFakeDataset/protocols/scenefake_folds/scenefake_folds/scenefake_eval_fold7.txt",
+            ]
 
-        print(f"Eval EER: {eval_eer:.3f}%")
-
-        
+            evaluate_kfold_from_protocols(folds, config, args, model, device)
+        else:
+            eval_eer = evaluate_eer_utterance(eval_loader, model, device)
+            evaluate_confusion_utterance(eval_loader, model,device)
+            print(f"Eval EER: {eval_eer:.3f}%")
         print("Evaluation finished 🗣️")
 
         sys.exit(0)
@@ -135,8 +149,10 @@ def main(args: argparse.Namespace) -> None:
         running_loss = train_epoch(trn_loader, model, optimizer, device,scheduler, scaler, config, class_weights)
 
         print("Validating the model...")
+        
         dev_eer = evaluate_eer_utterance(dev_loader, model, device)
 
+    
         print(f"Epoch {epoch:03d} | Loss {running_loss:.4f} | Dev EER {dev_eer:.3f}%")
         if dev_eer == 0 or dev_eer == 100:
             print("Dev EER fir se 0 aur 100 k paas hain bcccc 😭😭😭😭😭😭😭 🗣️ 🗣️ 🗣️ 🗣️ 🗣️ 🗣️ 🗣️ 🗣️ 🗣️ 🗣️ 🗣️ 🗣️ 🗣️ 🗣️ 🗣️")
@@ -144,8 +160,12 @@ def main(args: argparse.Namespace) -> None:
         writer.add_scalar("dev_eer", dev_eer, epoch)
        
     # Save checkpoint every 5 epochs
-        if (epoch + 1) % 5 == 0:
-            print("Epoch {epoch+1} aagya... saving the checkpoints ⓹")
+        # if (epoch + 1) % 5 == 0:
+        swa_start = int(0.7 * config["num_epochs"])
+
+        if epoch >= swa_start and (epoch + 1) % 5 == 0:
+            print(f"Epoch {epoch+1}... saving the checkpoints ⓹")
+
             save_path = checkpoint_dir / f"checkpoint_epoch_{epoch+1:03d}.pth"
             torch.save({
                 "epoch": epoch,
@@ -156,51 +176,17 @@ def main(args: argparse.Namespace) -> None:
             }, save_path)
 
             print(f"Saved!!  ")
-
-
-        if dev_eer <= best_dev_eer:
-            print("best model find at epoch", epoch)
-            best_dev_eer = dev_eer
-            torch.save(model.state_dict(),
-                       model_save_path / "epoch_{}_{:03.3f}.pth".format(epoch, dev_eer))
-          
-            print("Evaluating on the best model...🕵🏻🕵🏻🕵🏻🕵🏻🕵🏻🕵🏻🕵🏻🕵🏻🕵🏻🕵🏻 ")
-            eval_eer = evaluate_eer_utterance(eval_loader, model, device)
-
-            print(f"Eval EER: {eval_eer:.3f}%")
-
-            if eval_eer < best_eval_eer:
-                best_eval_eer = eval_eer
-                torch.save(model.state_dict(), model_save_path / "best.pth")
-
             print("Saving epoch {} for swa".format(epoch))
-
             optimizer_swa.update_swa()
             n_swa_update += 1
 
         writer.add_scalar("best_dev_eer", best_dev_eer, epoch)
         writer.add_scalar("best_eval_eer", best_eval_eer, epoch)
 
-    print("Starting final evaluation")
-    epoch += 1
-    if n_swa_update > 0:
-    
-        optimizer_swa.swap_swa_sgd()
-        optimizer_swa.bn_update(trn_loader, model, device=device)
-        torch.save(model.state_dict(), model_save_path / "swa_final.pth")
-
-    print("Final evaluation...")
-
-
     if n_swa_update > 0:
         optimizer_swa.swap_swa_sgd()
         optimizer_swa.bn_update(trn_loader, model, device=device)
         torch.save(model.state_dict(), model_save_path / "swa_final.pth")
-
-    final_eer = evaluate_eer_utterance(eval_loader, model, device)
-    print(f"Final Eval EER: {final_eer:.3f}%")
-
-
 
 def get_model(model_config: Dict, device: torch.device):
     """Define DNN model architecture"""

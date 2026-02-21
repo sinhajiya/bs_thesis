@@ -6,10 +6,8 @@ import soundfile as sf
 import matplotlib.pyplot as plt
 from scipy.signal import spectrogram
 
-# ---- EDIT THESE PATHS ----
 real_path = "/home/bs_thesis/datasets/OurDataset/SceneFake-Wild-Real/aud040_dev3.wav"
 fake_path = "/home/bs_thesis/datasets/OurDataset/SceneFake-Wild-Fake2/aud040_dev3_Human_SNRmatched.wav"
-# ---------------------------
 
 def load_mono(path):
     audio, sr = sf.read(path)
@@ -31,11 +29,8 @@ def plot_spec(audio, sr, title):
 
     plt.show()
 
-
-# ---- Real ----
 real_audio, real_sr = load_mono(real_path)
 plot_spec(real_audio, real_sr, "Real Spectrogram")
 
-# ---- Fake ----
 fake_audio, fake_sr = load_mono(fake_path)
 plot_spec(fake_audio, fake_sr, "Fake Spectrogram")

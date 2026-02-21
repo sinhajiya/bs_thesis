@@ -36,11 +36,12 @@ def protocol_reader(protocol_path, is_eval=False):
     
 def select_class(files, labels, target_class):
     return [f for f in files if labels[f] == target_class]
-
-def get_loader( seed, protocols, config):
+def get_loader(seed, protocols, config):
 
     gen = torch.Generator()
     gen.manual_seed(seed)
+
+    print("Reading all the protocol readers... (●'◡'●)")
 
     sf_train_labels, sf_train_files = protocol_reader(protocols["scenefake_train_protocol"])
     sf_val_labels, sf_val_files     = protocol_reader(protocols["scenefake_val_protocol"])
@@ -48,154 +49,164 @@ def get_loader( seed, protocols, config):
 
     wild_train_labels, wild_train_files = protocol_reader(protocols["wild_train_protocol"])
     wild_val_labels, wild_val_files     = protocol_reader(protocols["wild_val_protocol"])
-    wild_test_labels, wild_test_files     = protocol_reader(protocols["wild_test_protocol"])
-
-    train_files = []
-    train_labels = {}
+    wild_test_labels, wild_test_files   = protocol_reader(protocols["wild_test_protocol"])
 
     print("loaded all the protocols, now filtering out.. ")
 
     print("loading training file")
-    if protocols["real_train"] == "wild":
-        print("training k liye, apne real audios being used")
-        real_files = select_class(wild_train_files, wild_train_labels, 0)
-    elif protocols["real_train"] == "scenefake":
-        print("training k liye, unke real audios being used")
-        real_files = select_class(sf_train_files, sf_train_labels, 0)
-    else:
-        raise ValueError("Invalid real_train")
 
-    print("loaded unke fake classes for training")
-    fake_files = select_class(sf_train_files, sf_train_labels, 1)
-   
-
-    train_files += real_files + fake_files
-    train_labels.update({f: 0 for f in real_files})
-    train_labels.update({f: 1 for f in fake_files})
-    print(f"totaal training files are {len(train_files)} jinme se {len(real_files)} are real and {len(fake_files)} are fake..")
-    print("࣪ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ")
-
-    print("loading validations file")
-    dev_files = []
-    dev_labels = {}
-
-    if protocols["real_val"] == "wild":
-        print("validation k liye, apne real audios being used")
-
-        val_real_files = select_class(wild_val_files, wild_val_labels, 0)
-    else:
-        print("validation k liye, unke real audios being used")
-        val_real_files = select_class(sf_val_files, sf_val_labels, 0)
-
-    val_fake_files = select_class(sf_val_files, sf_val_labels, 1)
-    print("loaded unke fake classes")
-
-    dev_files += val_real_files + val_fake_files
-    dev_labels.update({f: 0 for f in val_real_files})
-    dev_labels.update({f: 1 for f in val_fake_files})
-    print(f"totaal validation files are {len(dev_files)} jinme se {len(val_real_files)} are real and {len(val_fake_files)} are fake..")
-
-    print("࣪ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ")
-    print("loading testing file")
-
-    eval_files = []
-    eval_labels = {}
-
-    if protocols["real_test"] == "wild":
-        print("testing k liye, apne real audios being used")
-        test_real_files = select_class(wild_test_files, wild_test_labels, 0)
-        
-    else:
-        print("testing k liye, unke real audios being used")
-        test_real_files = select_class(sf_test_files, sf_test_labels, 0)
-
-    test_fake_files = select_class(sf_test_files, sf_test_labels, 1)
-
-    eval_files += test_real_files + test_fake_files
-    eval_labels.update({f: 0 for f in test_real_files})
-    eval_labels.update({f: 1 for f in test_fake_files})
-    print(f"totaal testing files are {len(eval_files)} jinme se {len(test_real_files)} are real and {len(test_fake_files)} are fake..")
-
-    print("࣪ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡")
-
-    print("creating dataset class..")
     train_datasets = []
+    real_count = 0
+    fake_count = 0
 
-    if protocols["real_train"] == "wild":
-        real_dataset = SceneFakeWildTrainDataset(real_files, {f:0 for f in real_files})
-    else:
-        real_dataset = SceneFakeTrainDataset(real_files, {f:0 for f in real_files})
+    if protocols["real_train"] in ["wild", "both"]:
+        wild_real = select_class(wild_train_files, wild_train_labels, 0)
+        train_datasets.append(
+            SceneFakeWildTrainDataset(wild_real, {f: 0 for f in wild_real})
+        )
+        real_count += len(wild_real)
+        print(f"Loaded training real from wild: {len(wild_real)}")
 
-    train_datasets.append(real_dataset)
+    if protocols["real_train"] in ["scenefake", "both"]:
+        sf_real = select_class(sf_train_files, sf_train_labels, 0)
+        train_datasets.append(
+            SceneFakeTrainDataset(sf_real, {f: 0 for f in sf_real})
+        )
+        real_count += len(sf_real)
+        print(f"Loaded training real from scenefake: {len(sf_real)}")
 
-    fake_dataset = SceneFakeTrainDataset(fake_files, {f:1 for f in fake_files})
-    train_datasets.append(fake_dataset)
+    fake_files = select_class(sf_train_files, sf_train_labels, 1)
+    train_datasets.append(
+        SceneFakeTrainDataset(fake_files, {f: 1 for f in fake_files})
+    )
+    fake_count += len(fake_files)
+
+    print(f"Loaded fake classes for training: {fake_count}")
 
     train_set = ConcatDataset(train_datasets)
 
-    print("training dataset class ccreated..")
+    print(f"Total training files: real={real_count}, fake={fake_count}")
+    print("࣪ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ")
+
+
+
+    print("loading validations file")
 
     dev_datasets = []
+    val_real_count = 0
+    val_fake_count = 0
 
-    if protocols["real_val"] == "wild":
-        real_dataset = SceneFakeWildEvalDataset(val_real_files, {f:0 for f in val_real_files})
-    else:
-        real_dataset = SceneFakeEvalDataset(val_real_files, {f:0 for f in val_real_files})
-    dev_datasets.append(real_dataset)
+    if protocols["real_val"] in ["wild", "both"]:
+        wild_real_val = select_class(wild_val_files, wild_val_labels, 0)
+        dev_datasets.append(
+            SceneFakeWildEvalDataset(
+                wild_real_val,
+                {f: 0 for f in wild_real_val}
+            )
+        )
+        val_real_count += len(wild_real_val)
 
-    fake_dataset = SceneFakeEvalDataset(val_fake_files, {f:1 for f in val_fake_files})
+    if protocols["real_val"] in ["scenefake", "both"]:
+        sf_real_val = select_class(sf_val_files, sf_val_labels, 0)
+        dev_datasets.append(
+            SceneFakeEvalDataset(
+                sf_real_val,
+                {f: 0 for f in sf_real_val}
+            )
+        )
+        val_real_count += len(sf_real_val)
 
-    dev_datasets.append(fake_dataset)
+    val_fake_files = select_class(sf_val_files, sf_val_labels, 1)
+    dev_datasets.append(
+        SceneFakeEvalDataset(
+            val_fake_files,
+            {f: 1 for f in val_fake_files}
+        )
+    )
+    val_fake_count += len(val_fake_files)
 
     dev_set = ConcatDataset(dev_datasets)
 
-    print("dev dataset class created..")
+    print(f"Total validation files: real={val_real_count}, fake={val_fake_count}")
+    print("࣪ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ")
+
+
+
+
+    print("loading testing file")
 
     eval_datasets = []
+    test_real_count = 0
+    test_fake_count = 0
 
-    if protocols["real_test"] == "wild":
-        real_dataset = SceneFakeWildEvalDataset(test_real_files, {f:0 for f in test_real_files})
-    else:
-        real_dataset = SceneFakeEvalDataset(test_real_files, {f:0 for f in test_real_files})
+    if protocols["real_test"] in ["wild", "both"]:
+        wild_real_test = select_class(wild_test_files, wild_test_labels, 0)
+        eval_datasets.append(
+            SceneFakeWildEvalDataset(
+                wild_real_test,
+                {f: 0 for f in wild_real_test}
+            )
+        )
+        test_real_count += len(wild_real_test)
 
-    eval_datasets.append(real_dataset)
+    if protocols["real_test"] in ["scenefake", "both"]:
+        sf_real_test = select_class(sf_test_files, sf_test_labels, 0)
+        eval_datasets.append(
+            SceneFakeEvalDataset(
+                sf_real_test,
+                {f: 0 for f in sf_real_test}
+            )
+        )
+        test_real_count += len(sf_real_test)
 
-    fake_dataset = SceneFakeEvalDataset(test_fake_files, {f:1 for f in test_fake_files})
-    eval_datasets.append(fake_dataset)
+    test_fake_files = select_class(sf_test_files, sf_test_labels, 1)
+    eval_datasets.append(
+        SceneFakeEvalDataset(
+            test_fake_files,
+            {f: 1 for f in test_fake_files}
+        )
+    )
+    test_fake_count += len(test_fake_files)
 
     eval_set = ConcatDataset(eval_datasets)
+
+    print(f"Total testing files: real={test_real_count}, fake={test_fake_count}")
     print("test dataset class created..")
+    print("࣪ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ✌︎㋡ ")
 
-    labels_array = np.array(list(train_labels.values()))
-    real = np.sum(labels_array == 0)
-    fake = np.sum(labels_array == 1)
-    total = real + fake
-
+    total = real_count + fake_count
     class_weights = torch.tensor(
-        [fake / total, real / total],
+        [fake_count / total, real_count / total],
         dtype=torch.float32
     )
 
-    trn_loader = DataLoader(train_set,
-                            batch_size=config["batch_size"],
-                            shuffle=True,
-                            drop_last=True,
-                            num_workers=config.get("num_workers", 4),
-                            pin_memory=True)
+    trn_loader = DataLoader(
+        train_set,
+        batch_size=config["batch_size"],
+        shuffle=True,
+        drop_last=True,
+        num_workers=config.get("num_workers", 4),
+        pin_memory=True,
+    )
 
-    dev_loader = DataLoader(dev_set,
-                            batch_size=config["batch_size"],
-                            shuffle=False,
-                            num_workers=config.get("num_workers", 4),
-                            pin_memory=True)
+    dev_loader = DataLoader(
+        dev_set,
+        batch_size=config["batch_size"],
+        shuffle=False,
+        num_workers=config.get("num_workers", 4),
+        pin_memory=True,
+    )
 
-    eval_loader = DataLoader(eval_set,
-                             batch_size=config["batch_size"],
-                             shuffle=False,
-                             num_workers=config.get("num_workers", 4),
-                             pin_memory=True)
+    eval_loader = DataLoader(
+        eval_set,
+        batch_size=config["batch_size"],
+        shuffle=False,
+        num_workers=config.get("num_workers", 4),
+        pin_memory=True,
+    )
 
     print("dataloaders are ready ˚.🎀༘⋆")
+
     return trn_loader, dev_loader, eval_loader, class_weights
 
 
@@ -270,7 +281,7 @@ class SceneFakeWildTrainDataset(Dataset):
         self.labels = labels
         self.cut = cut
         self.sr = sr
-        self.hop = cut - sr 
+        self.hop = cut 
         self.index_map = []
 
         self._build_index()
@@ -306,6 +317,7 @@ class SceneFakeWildTrainDataset(Dataset):
 
         label = self.labels[path]
         return torch.tensor(audio), label
+    
 class SceneFakeWildEvalDataset(Dataset):
 
     def __init__(self, file_list, labels=None, cut=64600, sr=16000):
@@ -313,7 +325,7 @@ class SceneFakeWildEvalDataset(Dataset):
         self.labels = labels
         self.cut = cut
         self.sr = sr
-        self.hop = cut - sr  # 1 sec overlap
+        self.hop = cut # 1 sec overlap
         self.index_map = []
 
         self._build_index()
